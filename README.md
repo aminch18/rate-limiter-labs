@@ -185,14 +185,119 @@ Todas las implementaciones son seguras para uso concurrente.
 
 ---
 
-## Comandos
+## Cómo ejecutar los tests
+
+### Tests unitarios — los algoritmos
+
+Cada algoritmo tiene su propio `_test.go` con tests tabla-driven. Cubren: happy path, límite exacto, rechazo, `AllowN`, `Reset`, `Remaining` y concurrencia.
 
 ```bash
-go test ./... -race                                    # todos los tests
-go test ./benchmarks/ -bench=. -benchmem -count=3     # benchmarks
-go vet ./...                                           # linter
-gofmt -w .                                             # formato
-go run ./cmd/gateway                                   # gateway en :8080
-go run ./cmd/loadgen                                   # generador de carga
-go run ./cmd/loadgen -addr host:port                   # gateway custom
+# Todos los paquetes de una vez
+make test
+# o directamente:
+go test ./... -count=1 -timeout=60s
+
+# Con detector de data races (requiere gcc; nativo en Linux/macOS, requiere CGO en Windows)
+make test-race
+# o:
+go test ./... -race
+```
+
+Salida esperada — todos en verde:
+```
+ok  github.com/tu-usuario/rate-limiter-labs/internal/algorithms/fixedwindow
+ok  github.com/tu-usuario/rate-limiter-labs/internal/algorithms/leakybucket
+ok  github.com/tu-usuario/rate-limiter-labs/internal/algorithms/slidingcounter
+ok  github.com/tu-usuario/rate-limiter-labs/internal/algorithms/slidinglog
+ok  github.com/tu-usuario/rate-limiter-labs/internal/algorithms/tokenbucket
+ok  github.com/tu-usuario/rate-limiter-labs/internal/limiter
+```
+
+---
+
+### Benchmarks de algoritmos — comparativa de rendimiento
+
+Mide `ns/op`, `B/op` y `allocs/op` para los 5 algoritmos bajo 3 perfiles de carga: steady, burst y concurrent.
+
+```bash
+# Benchmark completo (3 runs, toma la mediana)
+make bench
+# o directamente:
+go test ./benchmarks/ -bench=. -benchmem -count=3
+
+# Rápido durante desarrollo (1 run, sin memoria)
+make bench-quick
+```
+
+Los resultados están commiteados en [`benchmarks/results/README.md`](benchmarks/results/README.md) con la explicación de cada número. Resumen:
+
+```
+Benchmark                  ns/op    B/op   allocs/op
+──────────────────────────────────────────────────────
+FixedWindow/Steady         11.9      0        0      ← más rápido, O(1)
+SlidingCounter/Steady      18.6      0        0      ← híbrido, O(1)
+TokenBucket/Steady         13.7      0        0      ← referencia, O(1)
+LeakyBucket/Steady         24.0      0        0      ← output uniforme, O(1)
+SlidingLog/Steady          40.2      0        0      ← exacto, O(n) memoria
+```
+
+> `SlidingLog` es 3–4× más lento. Su coste real no es por operación sino en **memoria residente**: `peticiones_en_ventana × 24 bytes` por cliente.
+
+---
+
+### Tests del gateway — comportamiento bajo tráfico real
+
+Esto es lo más interesante: ver cómo cada algoritmo reacciona diferente al mismo tráfico.
+
+**Paso 1 — Arrancar el gateway** (Terminal 1):
+```bash
+make gateway
+# o: go run ./cmd/gateway
+# → gateway listening on :8080
+```
+
+**Paso 2 — Lanzar el generador de carga** (Terminal 2):
+```bash
+make loadgen
+# o: go run ./cmd/loadgen
+```
+
+El loadgen lanza 3 patrones y muestra la tabla comparativa:
+
+```
+Pattern: burst — 30 req all at once
+Algorithm             Allowed   Denied   Allow%   Notes
+──────────────────────────────────────────────────────────────────
+TokenBucket                20       10    66.7%   ← absorbs burst up to capacity=20
+FixedWindow                10       20    33.3%   ← hard cutoff at limit=10
+LeakyBucket                20       10    66.7%   ← absorbs burst up to capacity=20
+SlidingLog                 10       20    33.3%   ← exact sliding window, limit=10
+SlidingCounter             10       20    33.3%   ← approx sliding window, limit=10
+```
+
+**La diferencia clave:** TokenBucket y LeakyBucket tienen `capacity=20` y absorben el burst. Los algoritmos de ventana tienen `limit=10` y cortan en duro. Esa diferencia de comportamiento es lo que los benchmarks de ns/op no te cuentan.
+
+También puedes apuntar el loadgen a un gateway remoto:
+```bash
+make loadgen-remote ADDR=host:port
+```
+
+---
+
+## Referencia de comandos
+
+> **Windows:** `make` requiere GNU Make (`winget install GnuWin32.Make`). Alternativamente usa los comandos `go` directamente — están todos documentados en el `Makefile`.
+
+```bash
+make test           # tests unitarios
+make test-race      # tests con -race (requiere gcc en Windows)
+make bench          # benchmarks comparativos (3 runs)
+make bench-quick    # benchmark rápido (1 run)
+make lint           # go vet
+make fmt            # gofmt
+make build          # compila binarios en bin/
+make gateway        # arranca gateway en :8080
+make loadgen        # lanza generador de carga
+make demo           # instrucciones para el demo completo
+make clean          # elimina binarios
 ```
