@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go version *)",
+      "PowerShell(go version)",
+      "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); Set-Location \"C:\\\\Users\\\\exper\\\\Development\\\\rate-limiter-labs\"; go test -bench=. -benchmem -count=3 -benchtime=1s ./benchmarks/ 2>&1)",
+      "PowerShell($env:PATH += \";C:\\\\Program Files\\\\Go\\\\bin\"; cd C:\\\\Users\\\\exper\\\\Development\\\\rate-limiter-labs; go build ./cmd/gateway ./cmd/loadgen 2>&1)"
+    ]
+  }
+}
