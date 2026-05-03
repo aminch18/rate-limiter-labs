@@ -4,6 +4,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/tu-usuario/rate-limiter-labs/internal/algorithms"
 	"github.com/tu-usuario/rate-limiter-labs/internal/algorithms/fixedwindow"
@@ -18,6 +19,7 @@ func fixedFactory(limit int) func() algorithms.RateLimiter {
 
 func TestMulti_IsolatesKeys(t *testing.T) {
 	m := limiter.NewMulti[string](fixedFactory(3))
+	defer m.Stop()
 
 	for i := 0; i < 3; i++ {
 		if !m.Allow("a") {
@@ -35,6 +37,7 @@ func TestMulti_IsolatesKeys(t *testing.T) {
 
 func TestMulti_Remaining(t *testing.T) {
 	m := limiter.NewMulti[string](fixedFactory(5))
+	defer m.Stop()
 
 	// Key not yet seen: -1 signals "no limiter created yet, no side effect on read".
 	if rem := m.Remaining("x"); rem != -1 {
@@ -57,6 +60,8 @@ func TestMulti_Remaining(t *testing.T) {
 
 func TestMulti_Len(t *testing.T) {
 	m := limiter.NewMulti[string](fixedFactory(10))
+	defer m.Stop()
+
 	m.Allow("a")
 	m.Allow("b")
 	m.Allow("a") // duplicate key — must not create a second entry
@@ -68,13 +73,14 @@ func TestMulti_Len(t *testing.T) {
 func TestMulti_Concurrent(t *testing.T) {
 	t.Parallel()
 	const (
-		keyCount   = 10
+		keyCount    = 10
 		perKeyLimit = 100
 		goroutines  = keyCount
 		callsEach   = 200 // 2× limit — half should be denied
 	)
 
 	m := limiter.NewMulti[int](fixedFactory(perKeyLimit))
+	defer m.Stop()
 
 	var wg sync.WaitGroup
 	var totalAllowed atomic.Int64
@@ -97,4 +103,32 @@ func TestMulti_Concurrent(t *testing.T) {
 		t.Errorf("total allowed %d exceeds %d keys × limit %d = %d",
 			got, keyCount, perKeyLimit, maxAllowed)
 	}
+}
+
+func TestMulti_Eviction(t *testing.T) {
+	m := limiter.NewMultiWithOptions[string](
+		fixedFactory(10),
+		limiter.WithEvictInterval(20*time.Millisecond),
+		limiter.WithIdleTTL(30*time.Millisecond),
+	)
+	defer m.Stop()
+
+	m.Allow("evict-me")
+	if m.Len() != 1 {
+		t.Fatalf("Len() = %d, want 1 after Allow", m.Len())
+	}
+
+	// Wait long enough for the eviction sweep to fire and remove the idle key.
+	time.Sleep(100 * time.Millisecond)
+
+	if n := m.Len(); n != 0 {
+		t.Errorf("Len() = %d after idle TTL expired, want 0", n)
+	}
+}
+
+func TestMulti_Stop(t *testing.T) {
+	m := limiter.NewMulti[string](fixedFactory(10))
+	// Stop must be idempotent — calling it twice must not panic.
+	m.Stop()
+	m.Stop()
 }

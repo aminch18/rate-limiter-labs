@@ -171,9 +171,8 @@ func statsHandler(eps []*endpoint) http.HandlerFunc {
 	}
 }
 
-func main() {
-	eps := buildEndpoints()
-
+// buildMux wires all endpoints into a ServeMux. Extracted for testability.
+func buildMux(eps []*endpoint) *http.ServeMux {
 	mux := http.NewServeMux()
 	for _, ep := range eps {
 		mux.HandleFunc("/"+ep.urlKey, ep.handler())
@@ -181,10 +180,16 @@ func main() {
 	mux.HandleFunc("/stats", statsHandler(eps))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if _, err := w.Write([]byte(`{"status":"ok"}`+"\n")); err != nil {
+		if _, err := w.Write([]byte(`{"status":"ok"}` + "\n")); err != nil {
 			log.Printf("healthz write: %v", err)
 		}
 	})
+	return mux
+}
+
+func main() {
+	eps := buildEndpoints()
+	mux := buildMux(eps)
 
 	srv := &http.Server{
 		Addr:              listenAddr,

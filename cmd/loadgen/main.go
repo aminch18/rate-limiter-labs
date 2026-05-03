@@ -40,14 +40,18 @@ type result struct {
 	notes   string
 }
 
-// sendN fires n HTTP GET requests to url, spacing them interval apart (0 = all concurrent).
-// Uses atomics instead of a mutex so goroutines never block each other on counter updates.
+// sendN fires n HTTP GET requests to url, spacing them interval apart.
+// interval == 0 means fire all requests concurrently (burst mode).
+// Uses a time.Ticker instead of time.Sleep for consistent inter-request spacing:
+// the ticker advances by exactly interval regardless of how long each request takes,
+// so the measured rate stays stable across slow and fast machines.
+// Uses atomics on counters so goroutines never block each other on updates.
 func sendN(url string, n int, interval time.Duration) result {
 	client := &http.Client{Timeout: 2 * time.Second}
 	var wg sync.WaitGroup
 	var r result
 
-	for i := 0; i < n; i++ {
+	fire := func() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -63,8 +67,20 @@ func sendN(url string, n int, interval time.Duration) result {
 				atomic.AddInt64(&r.denied, 1)
 			}
 		}()
-		if interval > 0 {
-			time.Sleep(interval)
+	}
+
+	if interval <= 0 {
+		// Burst: launch all goroutines immediately.
+		for i := 0; i < n; i++ {
+			fire()
+		}
+	} else {
+		// Paced: use a ticker so the rate is wall-clock accurate.
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for i := 0; i < n; i++ {
+			<-ticker.C
+			fire()
 		}
 	}
 	wg.Wait()
