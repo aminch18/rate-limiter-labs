@@ -1,0 +1,147 @@
+name: Load Test (k6)
+
+on:
+  # Run manually from the Actions tab — choose the branch and optionally override TARGET_URL.
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: "Gateway URL (leave blank to start a local gateway)"
+        required: false
+        default: ""
+      k6_vus:
+        description: "Override steady-state VUs (default: use script defaults)"
+        required: false
+        default: ""
+
+  # Weekly smoke run every Monday at 07:00 UTC against the local gateway.
+  schedule:
+    - cron: "0 7 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  load-test:
+    name: k6 Load Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Go + gateway ─────────────────────────────────────────────────────────
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build gateway
+        run: go build -o bin/gateway ./cmd/gateway
+
+      - name: Start gateway
+        run: |
+          TARGET="${{ github.event.inputs.target_url }}"
+          if [ -z "$TARGET" ]; then
+            echo "Starting local gateway on :8080..."
+            ./bin/gateway &
+            echo "GATEWAY_PID=$!" >> $GITHUB_ENV
+            echo "K6_TARGET_URL=http://127.0.0.1:8080" >> $GITHUB_ENV
+          else
+            echo "Using remote gateway: $TARGET"
+            echo "K6_TARGET_URL=$TARGET" >> $GITHUB_ENV
+          fi
+
+      - name: Wait for gateway to be healthy
+        run: |
+          TARGET_URL="${K6_TARGET_URL:-http://127.0.0.1:8080}"
+          echo "Polling $TARGET_URL/healthz ..."
+          for i in $(seq 1 30); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$TARGET_URL/healthz" 2>/dev/null || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "Gateway healthy after ${i}s"
+              exit 0
+            fi
+            echo "  attempt $i: HTTP $STATUS — retrying in 1s"
+            sleep 1
+          done
+          echo "Gateway did not become healthy in 30s. Dumping logs..." >&2
+          exit 1
+
+      # ── k6 ───────────────────────────────────────────────────────────────────
+
+      - name: Install k6
+        uses: grafana/setup-k6-action@v1
+
+      - name: Run k6 load test
+        env:
+          TARGET_URL: ${{ env.K6_TARGET_URL }}
+        run: |
+          EXTRA_ARGS=""
+          if [ -n "${{ github.event.inputs.k6_vus }}" ]; then
+            # Allow callers to tweak VUs without editing the script.
+            EXTRA_ARGS="--env OVERRIDE_VUS=${{ github.event.inputs.k6_vus }}"
+          fi
+          k6 run $EXTRA_ARGS \
+            -e TARGET_URL="${TARGET_URL}" \
+            --out json=k6-results.json \
+            --summary-export k6-summary.json \
+            k6/load_test.js 2>&1 | tee k6-output.txt
+          EXIT_CODE=${PIPESTATUS[0]}
+          exit $EXIT_CODE
+
+      # ── Artifacts + summary ──────────────────────────────────────────────────
+
+      - name: Upload k6 results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k6-results-${{ github.run_id }}
+          path: |
+            k6-results.json
+            k6-summary.json
+            k6-output.txt
+          retention-days: 30
+
+      - name: Post k6 summary to GitHub Step Summary
+        if: always()
+        run: |
+          echo "## k6 Load Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** \`${{ github.ref_name }}\`  " >> $GITHUB_STEP_SUMMARY
+          echo "**Gateway:** \`${K6_TARGET_URL}\`  " >> $GITHUB_STEP_SUMMARY
+          echo "**Triggered by:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Console output" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat k6-output.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+          # Parse threshold pass/fail from summary JSON if available.
+          if [ -f k6-summary.json ]; then
+            PASS=$(python3 -c "
+          import json, sys
+          d = json.load(open('k6-summary.json'))
+          metrics = d.get('metrics', {})
+          rows = []
+          for m in ['http_req_duration', 'unexpected_errors']:
+              if m in metrics:
+                  thresholds = metrics[m].get('thresholds', {})
+                  for expr, result in thresholds.items():
+                      ok = '✅' if result.get('ok') else '❌'
+                      rows.append(f'| {m} | {expr} | {ok} |')
+          if rows:
+              print('| Metric | Threshold | Status |')
+              print('|--------|-----------|--------|')
+              for r in rows:
+                  print(r)
+          " 2>/dev/null || echo "")
+            if [ -n "$PASS" ]; then
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "### Threshold summary" >> $GITHUB_STEP_SUMMARY
+              echo "$PASS" >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
+
+      - name: Stop local gateway
+        if: always() && env.GATEWAY_PID != ''
+        run: kill ${{ env.GATEWAY_PID }} 2>/dev/null || true
