@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -37,6 +38,39 @@ func TestHealthz(t *testing.T) {
 	}
 	if body["status"] != "ok" {
 		t.Errorf("status field = %q, want \"ok\"", body["status"])
+	}
+}
+
+func TestMetrics(t *testing.T) {
+	srv := newTestServer(t)
+
+	// Make a request first so counters are non-zero.
+	http.Get(srv.URL + "/token-bucket") //nolint:errcheck
+
+	resp, err := http.Get(srv.URL + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+	ct := resp.Header.Get("Content-Type")
+	if ct == "" {
+		t.Error("missing Content-Type header")
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	text := string(body)
+	for _, want := range []string{
+		"rate_limiter_requests_total",
+		"rate_limiter_active_keys",
+		`algorithm="TokenBucket"`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("metrics body missing %q", want)
+		}
 	}
 }
 

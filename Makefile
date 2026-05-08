@@ -18,6 +18,10 @@ help:
 	@echo "  make demo        Arranca gateway + loadgen juntos (necesita dos terminales)"
 	@echo "  make clean       Elimina binarios compilados"
 	@echo ""
+	@echo "k6 load tests"
+	@echo "  make k6          Lanza k6 contra gateway local (:8080)"
+	@echo "  make k6-remote   Lanza k6 contra gateway remoto (TARGET=http://host:8080)"
+	@echo ""
 	@echo "Docker"
 	@echo "  make docker-build  Construye las imágenes gateway y loadgen"
 	@echo "  make docker-up     Levanta gateway + loadgen con docker compose"
@@ -93,6 +97,17 @@ demo:
 
 clean:
 	rm -rf bin/
+
+# ── k6 load tests ─────────────────────────────────────────────────────────────
+
+# Run k6 against the local gateway (must be up on :8080).
+# Install k6: https://k6.io/docs/get-started/installation/
+k6:
+	k6 run k6/load_test.js
+
+# Run k6 against a remote gateway: make k6-remote TARGET=http://host:8080
+k6-remote:
+	k6 run -e TARGET_URL=$(TARGET) k6/load_test.js
 
 # ── Docker ────────────────────────────────────────────────────────────────────
 

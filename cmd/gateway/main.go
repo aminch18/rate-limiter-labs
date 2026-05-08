@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -171,6 +172,28 @@ func statsHandler(eps []*endpoint) http.HandlerFunc {
 	}
 }
 
+// metricsHandler exposes per-algorithm counters in Prometheus text format (v0.0.4).
+// No external dependency — the format is plain text: "metric{labels} value\n".
+// Prometheus scrapes this at /metrics; Grafana reads from Prometheus.
+func metricsHandler(eps []*endpoint) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+
+		fmt.Fprintln(w, "# HELP rate_limiter_requests_total Total requests handled by the gateway.")
+		fmt.Fprintln(w, "# TYPE rate_limiter_requests_total counter")
+		for _, ep := range eps {
+			fmt.Fprintf(w, "rate_limiter_requests_total{algorithm=%q,result=\"allowed\"} %d\n", ep.name, ep.allowed.Load())
+			fmt.Fprintf(w, "rate_limiter_requests_total{algorithm=%q,result=\"denied\"} %d\n", ep.name, ep.denied.Load())
+		}
+
+		fmt.Fprintln(w, "# HELP rate_limiter_active_keys Unique client IPs currently tracked per algorithm.")
+		fmt.Fprintln(w, "# TYPE rate_limiter_active_keys gauge")
+		for _, ep := range eps {
+			fmt.Fprintf(w, "rate_limiter_active_keys{algorithm=%q} %d\n", ep.name, ep.limiter.Len())
+		}
+	}
+}
+
 // buildMux wires all endpoints into a ServeMux. Extracted for testability.
 func buildMux(eps []*endpoint) *http.ServeMux {
 	mux := http.NewServeMux()
@@ -178,6 +201,7 @@ func buildMux(eps []*endpoint) *http.ServeMux {
 		mux.HandleFunc("/"+ep.urlKey, ep.handler())
 	}
 	mux.HandleFunc("/stats", statsHandler(eps))
+	mux.HandleFunc("/metrics", metricsHandler(eps))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if _, err := w.Write([]byte(`{"status":"ok"}` + "\n")); err != nil {
@@ -214,7 +238,7 @@ func main() {
 	}()
 
 	log.Printf("gateway listening on %s", listenAddr)
-	log.Printf("routes: /token-bucket /fixed-window /leaky-bucket /sliding-log /sliding-counter /stats /healthz")
+	log.Printf("routes: /token-bucket /fixed-window /leaky-bucket /sliding-log /sliding-counter /stats /metrics /healthz")
 
 	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("listen: %v", err)
