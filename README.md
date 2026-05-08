@@ -1,303 +1,251 @@
 # Rate Limiter Labs
 
-Implementación en Go de todos los algoritmos principales de rate limiting bajo una interfaz unificada, con tests, benchmarks comparativos y un **gateway HTTP en vivo** que muestra cómo se comporta cada algoritmo bajo tráfico real.
+[![CI](https://github.com/aminch18/rate-limiter-labs/actions/workflows/ci.yml/badge.svg)](https://github.com/aminch18/rate-limiter-labs/actions/workflows/ci.yml)
+[![Load Test](https://github.com/aminch18/rate-limiter-labs/actions/workflows/load-test.yml/badge.svg)](https://github.com/aminch18/rate-limiter-labs/actions/workflows/load-test.yml)
+[![Go 1.22+](https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go)](https://go.dev/dl/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-> Proyecto de aprendizaje — no es una librería de producción.
+Five rate limiting algorithms implemented from scratch in Go — same interface, same load, measurable differences.
 
 ---
 
-## Quickstart
+## Why this exists
 
-**Requisito:** Go 1.22+ → [go.dev/dl](https://go.dev/dl/)
+A few years ago I ran a .NET reverse proxy in production. Under spike traffic, open connections accumulated until the OS hit its limit — the service fell over. We migrated to a proper load balancer and API gateway, but the question stayed with me: **what exactly is happening inside those rate limiters, and why do different algorithms behave so differently under the same load?**
+
+This repo is the answer. Not a library, not a framework — a lab where you can run the same traffic pattern against five algorithms and watch the numbers diverge.
+
+---
+
+## The five algorithms
+
+| Algorithm | Memory | Burst tolerance | Boundary burst | Best for |
+|-----------|--------|-----------------|----------------|----------|
+| **Token Bucket** | O(1) | ✅ up to `capacity` | ✗ | General purpose — the industry default |
+| **Fixed Window** | O(1) | ✗ | ⚠️ 2× at boundary | Simplest implementation, internal services |
+| **Leaky Bucket** | O(1) | ✅ flattens completely | ✗ | Smooth output rate, payment processing |
+| **Sliding Log** | O(n) | ✗ | ✗ | Exact enforcement, audit-grade precision |
+| **Sliding Counter** | O(1) | ✗ | ~✗ approx | Best O(1) accuracy, production sweet spot |
+
+All implement the same interface:
+
+```go
+type RateLimiter interface {
+    Allow() bool
+    AllowN(n int) bool
+    Reset()
+    Remaining() int
+}
+```
+
+---
+
+## Benchmark results
+
+Measured on Intel i7-13700F, Go 1.22, `go test -bench=. -benchmem -count=3`.
+
+```
+Algorithm              Steady ns/op   Burst ns/op   Concurrent ns/op   Memory
+─────────────────────────────────────────────────────────────────────────────
+FixedWindow            11.9           19.9          76.6               O(1)
+TokenBucket            13.7           13.9          40.2               O(1)
+SlidingCounter         18.6           18.1          84.7               O(1)
+LeakyBucket            24.0           23.4          89.9               O(1)
+SlidingLog             40.2           206.6         106.8              O(n) ← 3–4× slower
+```
+
+`SlidingLog` is the only algorithm whose **resident memory scales with traffic**: ~24 KB per client at 1 000 req/s. All others hold a handful of fields regardless of load. The trade-off: it is the only mathematically exact sliding window — no approximation, no boundary bursts.
+
+→ Full analysis in [`benchmarks/results/README.md`](benchmarks/results/README.md)
+
+---
+
+## Quick start
+
+**Requirements:** Go 1.22+ · Docker (optional) · kind (optional)
 
 ```bash
-# Clonar y entrar al repo
-git clone https://github.com/tu-usuario/rate-limiter-labs
+git clone https://github.com/aminch18/rate-limiter-labs
 cd rate-limiter-labs
 
-# Tests (deben pasar todos en verde con -race)
+# Unit tests — all green, including race detector
 go test ./... -race
 
-# Benchmarks comparativos
+# Benchmarks
 go test ./benchmarks/ -bench=. -benchmem -count=3
 ```
 
 ---
 
-## Gateway en vivo (la parte interesante)
+## See the algorithms behave differently
 
-Un servidor HTTP con una ruta por algoritmo, más un generador de carga que lanza 3 patrones de tráfico y muestra la tabla comparativa.
+This is the interesting part. Start the gateway and hit it with three traffic patterns:
 
 ```bash
-# Terminal 1 — levantar el gateway
+# Terminal 1
 go run ./cmd/gateway
-# → gateway listening on :8080
 
-# Terminal 2 — lanzar el generador de carga
+# Terminal 2
 go run ./cmd/loadgen
 ```
 
-Salida esperada:
+Output:
 
 ```
-Rate Limiter Labs — Live Comparison
-Gateway: http://localhost:8080
-Config:  capacity/limit=20 (token/leaky) or 10 req/sec (window-based)
-
-Pattern: steady — 20 req @ 5/sec (below limit)
-Algorithm             Allowed   Denied   Allow%
-──────────────────────────────────────────────────────────────────
-TokenBucket                20        0   100.0%
-FixedWindow                20        0   100.0%
-LeakyBucket                20        0   100.0%
-SlidingLog                 20        0   100.0%
-SlidingCounter             20        0   100.0%
-
 Pattern: burst — 30 req all at once
 Algorithm             Allowed   Denied   Allow%   Notes
 ──────────────────────────────────────────────────────────────────
-TokenBucket                20       10    66.7%   ← absorbe burst hasta capacity=20
-FixedWindow                10       20    33.3%   ← corte duro en el límite=10
-LeakyBucket                20       10    66.7%   ← absorbe burst hasta capacity=20
-SlidingLog                 10       20    33.3%   ← ventana deslizante exacta
-SlidingCounter             10       20    33.3%   ← aproximación, mismo resultado
+TokenBucket                20       10    66.7%   ← absorbs burst to capacity=20
+FixedWindow                10       20    33.3%   ← hard cut at limit=10
+LeakyBucket                20       10    66.7%   ← absorbs burst to capacity=20
+SlidingLog                 10       20    33.3%   ← exact sliding window
+SlidingCounter             10       20    33.3%   ← approximation, same result
 
 Pattern: overload — 60 req @ 20/sec (2× limit)
 Algorithm             Allowed   Denied   Allow%   Notes
 ──────────────────────────────────────────────────────────────────
-TokenBucket                49       11    81.7%   ← tokens se recargan durante la ráfaga
-FixedWindow                30       30    50.0%   ← reset duro por ventana
-LeakyBucket                45       15    75.0%   ← drain rate suaviza el input
-SlidingLog                 30       30    50.0%   ← preciso, sin aproximación
-SlidingCounter             30       30    50.0%   ← blend ponderado, O(1) memoria
+TokenBucket                49       11    81.7%   ← tokens refill during the run
+FixedWindow                30       30    50.0%   ← hard reset per window
+LeakyBucket                45       15    75.0%   ← drain rate smooths input
+SlidingLog                 30       30    50.0%   ← precise, no approximation
+SlidingCounter             30       30    50.0%   ← weighted blend, O(1) memory
 ```
 
-También puedes probar cada endpoint manualmente:
+The gateway exposes per-algorithm endpoints with Prometheus metrics:
 
 ```bash
-curl -i http://localhost:8080/token-bucket
-curl -i http://localhost:8080/fixed-window
-curl -i http://localhost:8080/leaky-bucket
-curl -i http://localhost:8080/sliding-log
-curl -i http://localhost:8080/sliding-counter
+curl -i http://localhost:8080/token-bucket    # X-RateLimit-Remaining, X-RateLimit-Algorithm
+curl    http://localhost:8080/stats           # JSON: allowed/denied per algorithm
+curl    http://localhost:8080/metrics         # Prometheus text format
 ```
-
-Cada respuesta incluye:
-- `X-RateLimit-Algorithm` — qué algoritmo procesó la request
-- `X-RateLimit-Remaining` — slots estimados restantes
-- HTTP `200` si se permite, `429` si se rechaza
 
 ---
 
-## Los algoritmos
+## Load testing (k6)
 
-| Algoritmo | Memoria | Bursts | Boundary burst | Cuándo usarlo |
-|---|---|---|---|---|
-| Token Bucket | O(1) | Sí, hasta capacity | No | Caso general |
-| Fixed Window | O(1) | No | **Sí (2× en boundary)** | Máxima simplicidad |
-| Leaky Bucket | O(1) | Aplana bursts | No | Output rate uniforme |
-| Sliding Window Log | O(n) por cliente | No | No | Precisión exacta |
-| Sliding Window Counter | O(1) | No | Aprox. no | Híbrido práctico |
+Three scenarios against all five algorithms simultaneously, each VU with its own IP so the rate limiter sees independent clients:
 
-### Token Bucket
+- **Steady** — 5 VUs well below limit → all algorithms allow 100%
+- **Burst** — spike to 50 VUs → Token/Leaky Bucket absorb more than window-based algorithms
+- **Overload** — sustained 20 VUs at 2× limit → shows per-algorithm degradation pattern
 
-```go
-rl := tokenbucket.New(20, 10.0) // capacity=20, refill 10 tokens/sec
+### Three ways to run
+
+**Local (no cluster needed):**
+```bash
+go run ./cmd/gateway &
+k6 run k6/load_test.js
 ```
 
-El bucket acumula tokens hasta `capacity`. Cada request consume 1 token. Los bursts se absorben naturalmente hasta el límite del bucket.
-
-### Fixed Window Counter
-
-```go
-rl := fixedwindow.New(10, 1) // 10 req por ventana de 1 segundo
+**Kind (local Kubernetes, free):**
+```bash
+make kind-up kind-load kind-deploy
+make kind-test      # k6 against a real k8s cluster on your machine
+make kind-down
 ```
 
-El contador más simple. Resetea en cada ventana. Problema: un cliente puede enviar `2×limit` requests straddling dos ventanas consecutivas.
+**GitHub Actions (automated, free):**
 
-### Leaky Bucket
+Actions → *Load Test (k6 + kind)* → Run workflow
 
-```go
-rl := leakybucket.New(20, 10.0) // cola de 20, drena a 10/sec
-```
+Choose **Historia A** (limit=10, algorithm differences visible) or **Historia B** (limit=1 000, infrastructure scale). Choose **replicas > 1** to demonstrate the distributed rate limiting problem live.
 
-Las requests llenan una cola; si está llena se rechazan. La cola drena a tasa constante → output perfectamente uniforme. Los bursts se aplanan completamente.
-
-### Sliding Window Log
-
-```go
-rl := slidinglog.New(10, 1) // 10 req por ventana deslizante de 1 segundo
-```
-
-Guarda el timestamp de cada request aceptada. En cada llamada purga los timestamps fuera de la ventana y cuenta los restantes. Preciso, sin boundary bursts. Caro en memoria con alta carga (O(n) por cliente).
-
-### Sliding Window Counter
-
-```go
-rl := slidingcounter.New(10, 1) // ~10 req por ventana deslizante de 1 segundo
-```
-
-Mantiene dos contadores de ventana fija (actual y anterior) y mezcla con peso:
-```
-estimado = prev × (1 - elapsed/window) + curr
-```
-O(1) memoria, precisión prácticamente equivalente al Sliding Log.
+→ Full instructions in [`docs/load-testing.md`](docs/load-testing.md)
 
 ---
 
-## Estructura del proyecto
+## The distributed rate limiting problem
+
+With more than one gateway replica, in-memory rate limiting breaks:
+
+```
+Pod 1 → its own counter → limit = 1 000 req/s
+Pod 2 → its own counter → limit = 1 000 req/s
+Pod 3 → its own counter → limit = 1 000 req/s
+
+Result: a client can send 3 000 req/s without being rejected
+```
+
+Run the load test with `replicas=3` to see this live. The GitHub Actions summary will flag it explicitly. This is the concrete motivation for Redis-backed distributed rate limiting — the natural next step beyond this lab.
+
+---
+
+## Docker
+
+```bash
+# Gateway + loadgen + Prometheus + Grafana
+docker compose up --build --abort-on-container-exit
+
+# Grafana: http://localhost:3000  (anonymous admin, Prometheus pre-wired)
+# Prometheus: http://localhost:9090
+```
+
+---
+
+## Project structure
 
 ```
 rate-limiter-labs/
 ├── cmd/
-│   ├── gateway/main.go          # HTTP server — un endpoint por algoritmo
-│   └── loadgen/main.go          # Generador de carga + tabla comparativa
-├── internal/algorithms/
-│   ├── ratelimiter.go           # Interfaz RateLimiter
-│   ├── tokenbucket/
-│   ├── fixedwindow/
-│   ├── leakybucket/
-│   ├── slidinglog/
-│   └── slidingcounter/
-├── benchmarks/
-│   ├── bench_test.go            # Benchmarks comparativos
-│   └── results/README.md        # Resultados commiteados
-├── CLAUDE.md                    # Contrato para sesiones de Claude Code
-└── PRD.md                       # Product Requirements Document
+│   ├── gateway/          # HTTP server — one endpoint per algorithm + /metrics /stats /healthz
+│   └── loadgen/          # Go load generator — 3 traffic patterns, comparison table
+├── internal/
+│   ├── algorithms/       # RateLimiter interface + 5 implementations
+│   └── limiter/          # Multi[K] — per-key limiter with TTL eviction
+├── benchmarks/           # Comparative benchmarks + committed results
+├── k6/                   # k6 load test (3 scenarios, per-VU IP, custom metrics)
+├── k8s/                  # Kubernetes manifests (namespace, gateway, HPA, monitoring)
+├── terraform/            # Hetzner k3s provisioning
+├── config/               # Prometheus + Grafana provisioning for docker-compose
+├── docs/                 # Deep-dive documentation
+│   ├── internals.md      # Every design decision explained line by line
+│   ├── load-testing.md   # Load testing guide — local, kind, Hetzner
+│   └── decisions.md      # Original PRD — why this project was built this way
+└── .github/workflows/
+    ├── ci.yml            # Tests + build on every push/PR (ubuntu + macos)
+    └── load-test.yml     # k6 on kind — manual + weekly schedule
 ```
 
 ---
 
-## Interfaz unificada
-
-Todos los algoritmos implementan:
-
-```go
-type RateLimiter interface {
-    Allow() bool        // permite 1 request
-    AllowN(n int) bool  // permite n requests (batch)
-    Reset()             // resetea al estado inicial
-    Remaining() int     // slots restantes en la ventana actual
-}
-```
-
-Todas las implementaciones son seguras para uso concurrente.
-
----
-
-## Cómo ejecutar los tests
-
-### Tests unitarios — los algoritmos
-
-Cada algoritmo tiene su propio `_test.go` con tests tabla-driven. Cubren: happy path, límite exacto, rechazo, `AllowN`, `Reset`, `Remaining` y concurrencia.
+## Commands
 
 ```bash
-# Todos los paquetes de una vez
-make test
-# o directamente:
-go test ./... -count=1 -timeout=60s
+# Development
+make test           # go test ./... -count=1 -timeout=60s
+make test-race      # with race detector (requires gcc on Windows)
+make bench          # benchmarks — 3 runs, ns/op B/op allocs/op
+make lint           # go vet ./...
+make fmt            # gofmt -w .
+make build          # compile gateway + loadgen to bin/
 
-# Con detector de data races (requiere gcc; nativo en Linux/macOS, requiere CGO en Windows)
-make test-race
-# o:
-go test ./... -race
-```
+# Local demo
+make gateway        # start gateway on :8080
+make loadgen        # run load generator
+make k6             # k6 against local gateway
 
-Salida esperada — todos en verde:
-```
-ok  github.com/tu-usuario/rate-limiter-labs/internal/algorithms/fixedwindow
-ok  github.com/tu-usuario/rate-limiter-labs/internal/algorithms/leakybucket
-ok  github.com/tu-usuario/rate-limiter-labs/internal/algorithms/slidingcounter
-ok  github.com/tu-usuario/rate-limiter-labs/internal/algorithms/slidinglog
-ok  github.com/tu-usuario/rate-limiter-labs/internal/algorithms/tokenbucket
-ok  github.com/tu-usuario/rate-limiter-labs/internal/limiter
+# Kind (local k8s)
+make kind-up        # create cluster
+make kind-load      # build + load image into kind
+make kind-deploy    # apply manifests, wait for rollout
+make kind-test      # k6 against kind cluster
+make kind-down      # destroy cluster
+
+# Docker
+make docker-up      # gateway + loadgen + prometheus + grafana
+make docker-down
+
+# Hetzner k3s
+make tf-init && make tf-apply
 ```
 
 ---
 
-### Benchmarks de algoritmos — comparativa de rendimiento
+## Documentation
 
-Mide `ns/op`, `B/op` y `allocs/op` para los 5 algoritmos bajo 3 perfiles de carga: steady, burst y concurrent.
-
-```bash
-# Benchmark completo (3 runs, toma la mediana)
-make bench
-# o directamente:
-go test ./benchmarks/ -bench=. -benchmem -count=3
-
-# Rápido durante desarrollo (1 run, sin memoria)
-make bench-quick
-```
-
-Los resultados están commiteados en [`benchmarks/results/README.md`](benchmarks/results/README.md) con la explicación de cada número. Resumen:
-
-```
-Benchmark                  ns/op    B/op   allocs/op
-──────────────────────────────────────────────────────
-FixedWindow/Steady         11.9      0        0      ← más rápido, O(1)
-SlidingCounter/Steady      18.6      0        0      ← híbrido, O(1)
-TokenBucket/Steady         13.7      0        0      ← referencia, O(1)
-LeakyBucket/Steady         24.0      0        0      ← output uniforme, O(1)
-SlidingLog/Steady          40.2      0        0      ← exacto, O(n) memoria
-```
-
-> `SlidingLog` es 3–4× más lento. Su coste real no es por operación sino en **memoria residente**: `peticiones_en_ventana × 24 bytes` por cliente.
-
----
-
-### Tests del gateway — comportamiento bajo tráfico real
-
-Esto es lo más interesante: ver cómo cada algoritmo reacciona diferente al mismo tráfico.
-
-**Paso 1 — Arrancar el gateway** (Terminal 1):
-```bash
-make gateway
-# o: go run ./cmd/gateway
-# → gateway listening on :8080
-```
-
-**Paso 2 — Lanzar el generador de carga** (Terminal 2):
-```bash
-make loadgen
-# o: go run ./cmd/loadgen
-```
-
-El loadgen lanza 3 patrones y muestra la tabla comparativa:
-
-```
-Pattern: burst — 30 req all at once
-Algorithm             Allowed   Denied   Allow%   Notes
-──────────────────────────────────────────────────────────────────
-TokenBucket                20       10    66.7%   ← absorbs burst up to capacity=20
-FixedWindow                10       20    33.3%   ← hard cutoff at limit=10
-LeakyBucket                20       10    66.7%   ← absorbs burst up to capacity=20
-SlidingLog                 10       20    33.3%   ← exact sliding window, limit=10
-SlidingCounter             10       20    33.3%   ← approx sliding window, limit=10
-```
-
-**La diferencia clave:** TokenBucket y LeakyBucket tienen `capacity=20` y absorben el burst. Los algoritmos de ventana tienen `limit=10` y cortan en duro. Esa diferencia de comportamiento es lo que los benchmarks de ns/op no te cuentan.
-
-También puedes apuntar el loadgen a un gateway remoto:
-```bash
-make loadgen-remote ADDR=host:port
-```
-
----
-
-## Referencia de comandos
-
-> **Windows:** `make` requiere GNU Make (`winget install GnuWin32.Make`). Alternativamente usa los comandos `go` directamente — están todos documentados en el `Makefile`.
-
-```bash
-make test           # tests unitarios
-make test-race      # tests con -race (requiere gcc en Windows)
-make bench          # benchmarks comparativos (3 runs)
-make bench-quick    # benchmark rápido (1 run)
-make lint           # go vet
-make fmt            # gofmt
-make build          # compila binarios en bin/
-make gateway        # arranca gateway en :8080
-make loadgen        # lanza generador de carga
-make demo           # instrucciones para el demo completo
-make clean          # elimina binarios
-```
+| Doc | What it covers |
+|-----|---------------|
+| [`docs/internals.md`](docs/internals.md) | Every design decision explained — why `float64` for tokens, why double-checked locking, why `Ticker` over `Sleep`, the `maybeAdvance` bug |
+| [`docs/load-testing.md`](docs/load-testing.md) | Load testing guide — local k6, kind, GitHub Actions, Hetzner |
+| [`docs/decisions.md`](docs/decisions.md) | Original PRD — context for why this was built, algorithm trade-offs, design constraints |
+| [`benchmarks/results/README.md`](benchmarks/results/README.md) | Benchmark results with full statistical interpretation |
