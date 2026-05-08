@@ -1,7 +1,8 @@
-# Cómo funciona cada línea — Rate Limiter Labs
+# Internals — Design Decisions
 
-Este documento explica el razonamiento detrás de cada decisión de diseño del código.
-No es un tutorial de Go; es la guía para entender *por qué* cada línea existe.
+> Every line explained. Not a Go tutorial — a guide to understanding *why* each decision was made.
+
+← Back to [README](../README.md)
 
 ---
 

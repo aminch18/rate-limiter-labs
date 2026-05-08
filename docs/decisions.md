@@ -1,10 +1,17 @@
-# PRD — Rate Limiter Labs
+# Design Decisions & Original PRD
 
-**Version:** 0.1.0-draft  
-**Author:** tu-usuario  
+> This is the original Product Requirements Document written before the project was built.
+> It captures the *why* behind the design — algorithm choices, interface decisions, non-goals.
+> Kept as a historical record.
+
+← Back to [README](../README.md)
+
+---
+
+**Version:** 0.1.0  
+**Author:** aminch18  
 **Date:** 2026-05-02  
-**Status:** Draft  
-**Repo:** github.com/tu-usuario/rate-limiter-labs
+**Repo:** github.com/aminch18/rate-limiter-labs
 
 ---
 
@@ -200,7 +207,7 @@ The `CLAUDE.md` at the repo root is the binding contract for Claude Code session
 # Rate Limiter Labs — Claude Code Contract
 
 ## Module
-github.com/tu-usuario/rate-limiter-labs
+github.com/aminch18/rate-limiter-labs
 
 ## Go version
 1.22+
