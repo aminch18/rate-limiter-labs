@@ -1,12 +1,12 @@
 ---
-# Gateway Deployment — one pod, replace image tag before applying.
-# Scale replicas for load testing: kubectl scale deploy/gateway --replicas=3
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: gateway
+  namespace: rate-limiter
   labels:
     app: gateway
+    app.kubernetes.io/part-of: rate-limiter-labs
 spec:
   replicas: 1
   selector:
@@ -16,13 +16,24 @@ spec:
     metadata:
       labels:
         app: gateway
+      annotations:
+        # Prometheus auto-scrape via pod annotations.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
     spec:
       containers:
         - name: gateway
-          image: rate-limiter-gateway:latest   # replace with your registry/image:tag
+          # kind:  rate-limiter-gateway:local  (loaded with `kind load`)
+          # cloud: ghcr.io/<owner>/rate-limiter-gateway:<tag>
+          image: rate-limiter-gateway:local
           imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: 8080
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: gateway-config
           resources:
             requests:
               cpu: "100m"
@@ -36,22 +47,31 @@ spec:
               port: 8080
             initialDelaySeconds: 3
             periodSeconds: 10
+            failureThreshold: 3
           readinessProbe:
             httpGet:
               path: /healthz
               port: 8080
-            initialDelaySeconds: 3
+            initialDelaySeconds: 2
             periodSeconds: 5
+            failureThreshold: 3
 ---
-# ClusterIP so the loadgen Job can reach the gateway by name inside the cluster.
-# Change type: LoadBalancer (or add an Ingress) to expose externally.
 apiVersion: v1
 kind: Service
 metadata:
   name: gateway
+  namespace: rate-limiter
+  labels:
+    app: gateway
 spec:
   selector:
     app: gateway
+  # NodePort so kind can expose the gateway on the host without an Ingress.
+  # Fixed port 30080 matches the extraPortMappings in k8s/kind-config.yaml.
+  # In a cloud cluster with a LoadBalancer controller, change to LoadBalancer.
+  type: NodePort
   ports:
-    - port: 8080
+    - name: http
+      port: 8080
       targetPort: 8080
+      nodePort: 30080

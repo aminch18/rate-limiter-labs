@@ -1,7 +1,10 @@
 # Requiere GNU Make. En Windows: winget install GnuWin32.Make
 # o usar los comandos go directamente (ver README.md → "Referencia de comandos")
 .PHONY: help test bench lint fmt build gateway loadgen demo clean \
-        docker-build docker-up docker-down docker-logs k8s-apply k8s-delete
+        docker-build docker-up docker-down docker-logs \
+        kind-up kind-load kind-deploy kind-test kind-down kind-logs \
+        k8s-apply k8s-delete \
+        tf-init tf-plan tf-apply tf-destroy
 
 # Default target
 help:
@@ -130,6 +133,47 @@ docker-down:
 docker-logs:
 	docker compose logs -f gateway
 
+# ── kind (local k8s — Fase 1) ────────────────────────────────────────────────
+#
+# Prerequisites: kind (https://kind.sigs.k8s.io) and Docker running.
+#
+# Full workflow:
+#   make kind-up kind-load kind-deploy kind-test
+#   make kind-down   # when done
+
+# Create the local kind cluster with port mappings for gateway/prometheus/grafana.
+kind-up:
+	kind create cluster --name rate-limiter --config k8s/kind-config.yaml --wait 60s
+
+# Build the gateway image and load it into kind (no registry needed).
+kind-load:
+	docker build --build-arg CMD=gateway -t rate-limiter-gateway:local .
+	kind load docker-image rate-limiter-gateway:local --name rate-limiter
+
+# Apply all k8s manifests to the kind cluster.
+kind-deploy:
+	kubectl apply -f k8s/namespace.yaml
+	kubectl apply -f k8s/configmap.yaml
+	kubectl apply -f k8s/gateway.yaml
+	kubectl apply -f k8s/monitoring.yaml
+	kubectl rollout status deployment/gateway -n rate-limiter --timeout=90s
+	@echo ""
+	@echo "  Gateway:    http://localhost:8080"
+	@echo "  Prometheus: http://localhost:9090"
+	@echo "  Grafana:    http://localhost:3000"
+
+# Run k6 against the kind cluster.
+kind-test:
+	k6 run -e TARGET_URL=http://localhost:8080 k6/load_test.js
+
+# Tail gateway logs from kind.
+kind-logs:
+	kubectl logs -f -l app=gateway -n rate-limiter
+
+# Destroy the kind cluster.
+kind-down:
+	kind delete cluster --name rate-limiter
+
 # ── Kubernetes ────────────────────────────────────────────────────────────────
 
 # Apply all manifests. Set IMAGE_TAG before calling if pushing to a registry:
@@ -147,3 +191,26 @@ k8s-logs:
 
 k8s-delete:
 	kubectl delete -f k8s/ --ignore-not-found
+
+# ── Terraform / Hetzner (Fase 3) ──────────────────────────────────────────────
+#
+# Prerequisites: terraform CLI, a Hetzner API token, and an SSH key pair.
+# Create terraform.tfvars:
+#   hcloud_token   = "your-hetzner-api-token"
+#   ssh_public_key = "ssh-ed25519 AAAA..."
+#
+TF_DIR = terraform
+
+tf-init:
+	terraform -chdir=$(TF_DIR) init
+
+tf-plan:
+	terraform -chdir=$(TF_DIR) plan
+
+tf-apply:
+	terraform -chdir=$(TF_DIR) apply -auto-approve
+	@echo ""
+	@echo "Next: copy the kubeconfig_command output above and run it."
+
+tf-destroy:
+	terraform -chdir=$(TF_DIR) destroy -auto-approve

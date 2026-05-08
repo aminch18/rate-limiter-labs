@@ -1,0 +1,24 @@
+---
+# kind cluster configuration for local load testing.
+#
+# Creates a single-node cluster that maps host port 8080 → gateway NodePort,
+# host port 9090 → Prometheus NodePort, host port 3000 → Grafana NodePort.
+#
+# Usage:
+#   kind create cluster --name rate-limiter --config k8s/kind-config.yaml
+#
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: rate-limiter
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30080   # gateway
+        hostPort: 8080
+        protocol: TCP
+      - containerPort: 30090   # prometheus
+        hostPort: 9090
+        protocol: TCP
+      - containerPort: 30030   # grafana
+        hostPort: 3000
+        protocol: TCP

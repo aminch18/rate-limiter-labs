@@ -1,23 +1,21 @@
 ---
-# Loadgen Job — runs once, prints the comparison table, then exits.
-# To run a new load test after the first: kubectl delete job loadgen && kubectl apply -f k8s/loadgen-job.yaml
+# Loadgen Job — runs the Go load generator once and exits.
+# For k6-based load testing use the GitHub Actions workflow instead.
 #
-# For distributed load (multiple concurrent loadgens hitting the same gateway):
-#   kubectl scale job loadgen --replicas=5   # not natively supported on Job
-#   → Use a Deployment instead and set replicas, or submit N independent Jobs.
+# Re-run: kubectl delete job loadgen -n rate-limiter && kubectl apply -f k8s/loadgen-job.yaml
 apiVersion: batch/v1
 kind: Job
 metadata:
   name: loadgen
+  namespace: rate-limiter
 spec:
-  # Don't retry on failure — a failed loadgen is a bug, not a transient error.
   backoffLimit: 0
   template:
     spec:
       restartPolicy: Never
       containers:
         - name: loadgen
-          image: rate-limiter-loadgen:latest   # replace with your registry/image:tag
+          image: rate-limiter-loadgen:local
           imagePullPolicy: IfNotPresent
           args: ["-addr", "gateway:8080"]
           resources:

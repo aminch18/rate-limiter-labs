@@ -1,0 +1,198 @@
+name: Deploy & Load Test (Cloud — Hetzner k3s)
+
+on:
+  workflow_dispatch:
+    inputs:
+      historia:
+        description: "A = algorithm behavior (limit=10) | B = infra scale (limit=1000)"
+        required: false
+        default: "B"
+        type: choice
+        options: [A, B]
+      replicas:
+        description: "Gateway replicas (try 1, then 3 to show distributed problem)"
+        required: false
+        default: "1"
+      run_loadtest:
+        description: "Run k6 after deploying?"
+        required: false
+        default: "true"
+        type: boolean
+
+# Required secrets:
+#   KUBECONFIG_CLOUD  — base64-encoded kubeconfig for the Hetzner k3s cluster
+#                       (see terraform/ for provisioning instructions)
+#   GHCR_TOKEN        — GitHub token with packages:write (or use GITHUB_TOKEN)
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  deploy:
+    name: Deploy to Hetzner k3s
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # ── Build & push image to ghcr.io ────────────────────────────────────
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push gateway image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          build-args: CMD=gateway
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/gateway:${{ github.sha }}
+            ghcr.io/${{ github.repository }}/gateway:latest
+
+      # ── Configure kubectl ─────────────────────────────────────────────────
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_CLOUD }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+          kubectl cluster-info
+
+      # ── Deploy to cluster ─────────────────────────────────────────────────
+
+      - name: Apply manifests
+        run: |
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/configmap.yaml
+          kubectl apply -f k8s/monitoring.yaml
+
+      - name: Set Historia ${{ github.event.inputs.historia }} limits
+        run: |
+          HISTORIA="${{ github.event.inputs.historia || 'B' }}"
+          if [ "$HISTORIA" = "B" ]; then
+            kubectl create configmap gateway-config \
+              --from-literal=WINDOW_LIMIT=1000 \
+              --from-literal=CAPACITY=2000 \
+              --from-literal=RATE_PER_SEC=1000 \
+              --from-literal=WINDOW_SECS=1 \
+              --namespace rate-limiter \
+              --dry-run=client -o yaml | kubectl apply -f -
+          else
+            kubectl apply -f k8s/configmap.yaml
+          fi
+
+      - name: Deploy gateway
+        run: |
+          IMAGE="ghcr.io/${{ github.repository }}/gateway:${{ github.sha }}"
+          # Patch the image in the deployment and set imagePullPolicy to Always
+          # so k3s always pulls the latest push.
+          kubectl set image deployment/gateway gateway="$IMAGE" \
+            -n rate-limiter 2>/dev/null || \
+          kubectl apply -f k8s/gateway.yaml
+          kubectl set image deployment/gateway gateway="$IMAGE" -n rate-limiter
+          kubectl patch deployment gateway -n rate-limiter \
+            -p '{"spec":{"template":{"spec":{"containers":[{"name":"gateway","imagePullPolicy":"Always"}]}}}}'
+
+      - name: Scale to ${{ github.event.inputs.replicas || '1' }} replica(s)
+        run: |
+          REPLICAS="${{ github.event.inputs.replicas || '1' }}"
+          kubectl scale deployment/gateway --replicas="$REPLICAS" -n rate-limiter
+          kubectl rollout status deployment/gateway -n rate-limiter --timeout=120s
+          echo ""
+          echo "Active pods:"
+          kubectl get pods -n rate-limiter -l app=gateway
+
+      - name: Get gateway external IP
+        id: gateway_ip
+        run: |
+          # k3s exposes the node IP directly — get the external IP of the node.
+          NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="ExternalIP")].address}')
+          if [ -z "$NODE_IP" ]; then
+            NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+          fi
+          echo "GATEWAY_URL=http://${NODE_IP}:30080" >> $GITHUB_ENV
+          echo "Node IP: ${NODE_IP}"
+          echo "Gateway URL: http://${NODE_IP}:30080"
+
+      - name: Wait for gateway healthz
+        run: |
+          echo "Polling ${GATEWAY_URL}/healthz ..."
+          for i in $(seq 1 30); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${GATEWAY_URL}/healthz" 2>/dev/null || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "Gateway healthy after ${i}s"
+              exit 0
+            fi
+            echo "  attempt $i: HTTP $STATUS"
+            sleep 2
+          done
+          echo "Gateway not healthy after 60s" >&2
+          exit 1
+
+      # ── k6 load test (optional) ───────────────────────────────────────────
+
+      - name: Install k6
+        if: ${{ github.event.inputs.run_loadtest != 'false' }}
+        uses: grafana/setup-k6-action@v1
+
+      - name: Run k6 against cloud cluster
+        if: ${{ github.event.inputs.run_loadtest != 'false' }}
+        run: |
+          k6 run \
+            -e TARGET_URL="${GATEWAY_URL}" \
+            --out json=k6-results.json \
+            --summary-export k6-summary.json \
+            k6/load_test.js 2>&1 | tee k6-output.txt
+          EXIT_CODE=${PIPESTATUS[0]}
+          exit $EXIT_CODE
+
+      # ── Summary ───────────────────────────────────────────────────────────
+
+      - name: Post Step Summary
+        if: always()
+        run: |
+          HISTORIA="${{ github.event.inputs.historia || 'B' }}"
+          REPLICAS="${{ github.event.inputs.replicas || '1' }}"
+
+          echo "## Cloud Load Test — Historia ${HISTORIA} · ${REPLICAS} replica(s)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Cluster:** Hetzner k3s  " >> $GITHUB_STEP_SUMMARY
+          echo "**Gateway:** \`${GATEWAY_URL}\`  " >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`ghcr.io/${{ github.repository }}/gateway:${{ github.sha }}\`  " >> $GITHUB_STEP_SUMMARY
+          if [ "$REPLICAS" != "1" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "> ⚠️ **${REPLICAS} replicas** — in-memory rate limiting is distributed across pods." >> $GITHUB_STEP_SUMMARY
+            echo "> Each pod has its own counter. Effective limit = ${REPLICAS}× the configured limit." >> $GITHUB_STEP_SUMMARY
+            echo "> This demonstrates why Redis-backed distributed rate limiting exists." >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ -f k6-output.txt ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### k6 output" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat k6-output.txt >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloud-results-${{ github.run_id }}-h${{ github.event.inputs.historia || 'B' }}-r${{ github.event.inputs.replicas || '1' }}
+          path: |
+            k6-results.json
+            k6-summary.json
+            k6-output.txt
+          retention-days: 30

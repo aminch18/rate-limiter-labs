@@ -1,0 +1,28 @@
+---
+# Algorithm parameters for the gateway.
+#
+# Two profiles are provided — uncomment the one you need:
+#
+#   historia-a (default): small limits so algorithm differences are
+#   immediately visible in Grafana. Use for demos and blog screenshots.
+#
+#   historia-b: production-scale limits for infrastructure benchmarking.
+#   Swap these values to measure real throughput and latency under load.
+#
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-config
+  namespace: rate-limiter
+data:
+  # ── Historia A — algorithm behavior (default) ────────────────────────────
+  WINDOW_LIMIT: "10"
+  CAPACITY: "20"
+  RATE_PER_SEC: "10"
+  WINDOW_SECS: "1"
+
+  # ── Historia B — infrastructure scale (uncomment to activate) ────────────
+  # WINDOW_LIMIT: "1000"
+  # CAPACITY: "2000"
+  # RATE_PER_SEC: "1000"
+  # WINDOW_SECS: "1"

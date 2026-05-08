@@ -136,7 +136,7 @@ func TestEndpoints_429AfterLimit(t *testing.T) {
 	srv := newTestServer(t)
 	client := srv.Client()
 
-	const limit = windowLimit // 10, defined in main.go
+	const limit = 10 // matches default WINDOW_LIMIT env var in main.go
 
 	// Exhaust the quota for a single IP (the test server IP will be 127.0.0.1).
 	for i := 0; i < limit; i++ {
