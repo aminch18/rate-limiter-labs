@@ -83,10 +83,18 @@ export const options = {
   },
 };
 
+// Each VU gets a unique fake IP so the gateway treats them as separate clients.
+// __VU is a k6 built-in: the VU number (1…maxVUs). We map it to 10.0.x.y so
+// up to 65 535 VUs are representable without overlap.
+// The gateway already trusts X-Forwarded-For (see clientIP() in main.go), so
+// no gateway changes are needed — this is purely a test-harness concern.
+const CLIENT_IP = `10.0.${Math.floor((__VU - 1) / 256)}.${(__VU - 1) % 256 + 1}`;
+
 /** Hit every algorithm endpoint once and record results. */
 function hitAll(tag) {
   for (const ep of ENDPOINTS) {
     const res = http.get(`${BASE}/${ep}`, {
+      headers: { 'X-Forwarded-For': CLIENT_IP },
       tags: { algorithm: ep, scenario: tag },
     });
 
