@@ -43,11 +43,39 @@ import (
 
 const (
 	listenAddr      = ":8080"
-	capacity        = 20
-	ratePerSec      = 10.0
-	windowSecs      = 1
-	windowLimit     = 10
 	shutdownTimeout = 5 * time.Second
+)
+
+// envInt reads an integer from the environment, falling back to def.
+// This lets k8s ConfigMaps override algorithm parameters without rebuilding
+// the image — e.g. WINDOW_LIMIT=1000 for load testing at realistic scale.
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return def
+}
+
+func envFloat(key string, def float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 {
+			return f
+		}
+	}
+	return def
+}
+
+// Algorithm parameters — override via environment variables.
+// Defaults (10 req/s, capacity 20) are intentionally small so unit tests
+// and local demos are easy to reason about. Set higher values in k8s
+// ConfigMaps for realistic load testing (e.g. WINDOW_LIMIT=1000).
+var (
+	capacity    = envInt("CAPACITY", 20)
+	windowLimit = envInt("WINDOW_LIMIT", 10)
+	windowSecs  = envInt("WINDOW_SECS", 1)
+	ratePerSec  = envFloat("RATE_PER_SEC", 10.0)
 )
 
 // endpoint pairs a per-IP keyed limiter with aggregate allow/deny counters.

@@ -1,0 +1,38 @@
+---
+# HorizontalPodAutoscaler — scales gateway pods between 1 and 5 replicas
+# based on CPU utilization.
+#
+# IMPORTANT: With more than 1 replica, in-memory rate limiting breaks.
+# Each pod has its own counter — a client can send N×limit req/s before
+# being rejected. This is intentional for the load test experiment:
+#
+#   1 replica  → rate limiting works correctly
+#   3 replicas → effective limit is 3× — clients bypass the limiter
+#
+# This demonstrates WHY distributed rate limiting (Redis backend) exists.
+# See docs/distributed-rate-limiting.md for the next step.
+#
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: gateway
+  namespace: rate-limiter
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: gateway
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+    scaleDown:
+      stabilizationWindowSeconds: 60

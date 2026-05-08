@@ -1,62 +1,96 @@
-name: Load Test (k6)
+name: Load Test (k6 + kind)
 
 on:
-  # Run manually from the Actions tab — choose the branch and optionally override TARGET_URL.
   workflow_dispatch:
     inputs:
-      target_url:
-        description: "Gateway URL (leave blank to start a local gateway)"
+      historia:
+        description: "A = algorithm behavior (limit=10) | B = infra scale (limit=1000)"
         required: false
-        default: ""
-      k6_vus:
-        description: "Override steady-state VUs (default: use script defaults)"
+        default: "A"
+        type: choice
+        options: [A, B]
+      replicas:
+        description: "Gateway replicas (>1 demonstrates distributed rate limiting problem)"
         required: false
-        default: ""
+        default: "1"
 
-  # Weekly smoke run every Monday at 07:00 UTC against the local gateway.
   schedule:
-    - cron: "0 7 * * 1"
+    - cron: "0 7 * * 1"   # Every Monday 07:00 UTC — Historia A, 1 replica
 
 permissions:
   contents: read
 
 jobs:
   load-test:
-    name: k6 Load Test
+    name: k6 on kind (${{ github.event.inputs.historia || 'A' }}, ${{ github.event.inputs.replicas || '1' }} replica(s))
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
-
-      # ── Go + gateway ─────────────────────────────────────────────────────────
 
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
 
-      - name: Build gateway
-        run: go build -o bin/gateway ./cmd/gateway
+      # ── Kind cluster ─────────────────────────────────────────────────────
 
-      - name: Start gateway
+      - name: Install kind
         run: |
-          TARGET="${{ github.event.inputs.target_url }}"
-          if [ -z "$TARGET" ]; then
-            echo "Starting local gateway on :8080..."
-            ./bin/gateway &
-            echo "GATEWAY_PID=$!" >> $GITHUB_ENV
-            echo "K6_TARGET_URL=http://127.0.0.1:8080" >> $GITHUB_ENV
-          else
-            echo "Using remote gateway: $TARGET"
-            echo "K6_TARGET_URL=$TARGET" >> $GITHUB_ENV
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.23.0/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+
+      - name: Create kind cluster
+        run: kind create cluster --name rate-limiter --config k8s/kind-config.yaml --wait 60s
+
+      # ── Build & load image into kind ─────────────────────────────────────
+
+      - name: Build gateway image
+        run: docker build --build-arg CMD=gateway -t rate-limiter-gateway:local .
+
+      - name: Load image into kind
+        run: kind load docker-image rate-limiter-gateway:local --name rate-limiter
+
+      # ── Deploy to kind ────────────────────────────────────────────────────
+
+      - name: Set algorithm limits (Historia B overrides ConfigMap)
+        run: |
+          HISTORIA="${{ github.event.inputs.historia || 'A' }}"
+          if [ "$HISTORIA" = "B" ]; then
+            echo "Historia B: applying production-scale limits (WINDOW_LIMIT=1000)"
+            # Patch the ConfigMap inline — no need to edit the file
+            kubectl create configmap gateway-config \
+              --from-literal=WINDOW_LIMIT=1000 \
+              --from-literal=CAPACITY=2000 \
+              --from-literal=RATE_PER_SEC=1000 \
+              --from-literal=WINDOW_SECS=1 \
+              --namespace rate-limiter \
+              --dry-run=client -o yaml | \
+            kubectl apply -f - || true
           fi
 
-      - name: Wait for gateway to be healthy
+      - name: Apply k8s manifests
         run: |
-          TARGET_URL="${K6_TARGET_URL:-http://127.0.0.1:8080}"
-          echo "Polling $TARGET_URL/healthz ..."
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/configmap.yaml
+          kubectl apply -f k8s/gateway.yaml
+          kubectl apply -f k8s/monitoring.yaml
+
+      - name: Scale gateway replicas
+        run: |
+          REPLICAS="${{ github.event.inputs.replicas || '1' }}"
+          kubectl scale deployment/gateway --replicas="$REPLICAS" -n rate-limiter
+          echo "Gateway scaled to $REPLICAS replica(s)"
+
+      - name: Wait for gateway rollout
+        run: kubectl rollout status deployment/gateway -n rate-limiter --timeout=90s
+
+      - name: Wait for gateway healthz
+        run: |
+          echo "Polling http://localhost:8080/healthz ..."
           for i in $(seq 1 30); do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$TARGET_URL/healthz" 2>/dev/null || echo "000")
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/healthz 2>/dev/null || echo "000")
             if [ "$STATUS" = "200" ]; then
               echo "Gateway healthy after ${i}s"
               exit 0
@@ -64,84 +98,101 @@ jobs:
             echo "  attempt $i: HTTP $STATUS — retrying in 1s"
             sleep 1
           done
-          echo "Gateway did not become healthy in 30s. Dumping logs..." >&2
+          echo "Gateway did not become healthy — dumping pod logs" >&2
+          kubectl logs -l app=gateway -n rate-limiter --tail=50
           exit 1
 
-      # ── k6 ───────────────────────────────────────────────────────────────────
+      # ── k6 load test ──────────────────────────────────────────────────────
 
       - name: Install k6
         uses: grafana/setup-k6-action@v1
 
-      - name: Run k6 load test
-        env:
-          TARGET_URL: ${{ env.K6_TARGET_URL }}
+      - name: Run k6
         run: |
-          EXTRA_ARGS=""
-          if [ -n "${{ github.event.inputs.k6_vus }}" ]; then
-            # Allow callers to tweak VUs without editing the script.
-            EXTRA_ARGS="--env OVERRIDE_VUS=${{ github.event.inputs.k6_vus }}"
-          fi
-          k6 run $EXTRA_ARGS \
-            -e TARGET_URL="${TARGET_URL}" \
+          k6 run \
+            -e TARGET_URL=http://localhost:8080 \
             --out json=k6-results.json \
             --summary-export k6-summary.json \
             k6/load_test.js 2>&1 | tee k6-output.txt
           EXIT_CODE=${PIPESTATUS[0]}
           exit $EXIT_CODE
 
-      # ── Artifacts + summary ──────────────────────────────────────────────────
+      # ── Collect pod metrics snapshot ─────────────────────────────────────
 
-      - name: Upload k6 results
+      - name: Collect gateway stats
+        if: always()
+        run: |
+          echo "=== /stats ===" > gateway-stats.txt
+          curl -s http://localhost:8080/stats | python3 -m json.tool >> gateway-stats.txt 2>/dev/null || true
+          echo "" >> gateway-stats.txt
+          echo "=== pod resources ===" >> gateway-stats.txt
+          kubectl top pods -n rate-limiter >> gateway-stats.txt 2>/dev/null || true
+          cat gateway-stats.txt
+
+      # ── Artifacts & summary ───────────────────────────────────────────────
+
+      - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: k6-results-${{ github.run_id }}
+          name: k6-results-${{ github.run_id }}-historia${{ github.event.inputs.historia || 'A' }}-r${{ github.event.inputs.replicas || '1' }}
           path: |
             k6-results.json
             k6-summary.json
             k6-output.txt
+            gateway-stats.txt
           retention-days: 30
 
-      - name: Post k6 summary to GitHub Step Summary
+      - name: Post Step Summary
         if: always()
         run: |
-          echo "## k6 Load Test Results" >> $GITHUB_STEP_SUMMARY
+          HISTORIA="${{ github.event.inputs.historia || 'A' }}"
+          REPLICAS="${{ github.event.inputs.replicas || '1' }}"
+
+          echo "## k6 Load Test — Historia ${HISTORIA} · ${REPLICAS} replica(s)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Branch:** \`${{ github.ref_name }}\`  " >> $GITHUB_STEP_SUMMARY
-          echo "**Gateway:** \`${K6_TARGET_URL}\`  " >> $GITHUB_STEP_SUMMARY
-          echo "**Triggered by:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Historia | ${HISTORIA} ($([ "$HISTORIA" = "A" ] && echo 'limit=10, algorithm behavior' || echo 'limit=1000, infra scale')) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Replicas | ${REPLICAS} $([ "$REPLICAS" != "1" ] && echo '⚠️ distributed rate-limiting problem active' || echo '') |" >> $GITHUB_STEP_SUMMARY
+          echo "| Branch | \`${{ github.ref_name }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Console output" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           cat k6-output.txt >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
-          # Parse threshold pass/fail from summary JSON if available.
           if [ -f k6-summary.json ]; then
-            PASS=$(python3 -c "
+            THRESHOLDS=$(python3 -c "
           import json, sys
           d = json.load(open('k6-summary.json'))
-          metrics = d.get('metrics', {})
           rows = []
-          for m in ['http_req_duration', 'unexpected_errors']:
-              if m in metrics:
-                  thresholds = metrics[m].get('thresholds', {})
-                  for expr, result in thresholds.items():
-                      ok = '✅' if result.get('ok') else '❌'
-                      rows.append(f'| {m} | {expr} | {ok} |')
+          for m, data in d.get('metrics', {}).items():
+              for expr, result in data.get('thresholds', {}).items():
+                  ok = '✅' if result.get('ok') else '❌'
+                  rows.append(f'| {m} | \`{expr}\` | {ok} |')
           if rows:
               print('| Metric | Threshold | Status |')
               print('|--------|-----------|--------|')
-              for r in rows:
-                  print(r)
+              for r in rows: print(r)
           " 2>/dev/null || echo "")
-            if [ -n "$PASS" ]; then
+            if [ -n "$THRESHOLDS" ]; then
               echo "" >> $GITHUB_STEP_SUMMARY
-              echo "### Threshold summary" >> $GITHUB_STEP_SUMMARY
-              echo "$PASS" >> $GITHUB_STEP_SUMMARY
+              echo "### Thresholds" >> $GITHUB_STEP_SUMMARY
+              echo "$THRESHOLDS" >> $GITHUB_STEP_SUMMARY
             fi
           fi
 
-      - name: Stop local gateway
-        if: always() && env.GATEWAY_PID != ''
-        run: kill ${{ env.GATEWAY_PID }} 2>/dev/null || true
+          if [ -f gateway-stats.txt ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Gateway /stats" >> $GITHUB_STEP_SUMMARY
+            echo '```json' >> $GITHUB_STEP_SUMMARY
+            curl -s http://localhost:8080/stats | python3 -m json.tool >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "unavailable"
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+      # ── Cleanup ───────────────────────────────────────────────────────────
+
+      - name: Destroy kind cluster
+        if: always()
+        run: kind delete cluster --name rate-limiter

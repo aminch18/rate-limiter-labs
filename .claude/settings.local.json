@@ -6,7 +6,12 @@
       "PowerShell($env:Path = [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"Machine\"\\) + \";\" + [System.Environment]::GetEnvironmentVariable\\(\"Path\",\"User\"\\); Set-Location \"C:\\\\Users\\\\exper\\\\Development\\\\rate-limiter-labs\"; go test -bench=. -benchmem -count=3 -benchtime=1s ./benchmarks/ 2>&1)",
       "PowerShell($env:PATH += \";C:\\\\Program Files\\\\Go\\\\bin\"; cd C:\\\\Users\\\\exper\\\\Development\\\\rate-limiter-labs; go build ./cmd/gateway ./cmd/loadgen 2>&1)",
       "WebFetch(domain:api.github.com)",
-      "WebFetch(domain:raw.githubusercontent.com)"
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(git add *)",
+      "Bash(git commit -m 'fix\\(k6\\): mark 429 as expected status to clean up http_req_failed metric *)",
+      "Bash(git checkout *)",
+      "Bash(git merge *)",
+      "Bash(git push *)"
     ]
   }
 }
