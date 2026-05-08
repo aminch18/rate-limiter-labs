@@ -19,6 +19,11 @@ import http from 'k6/http';
 import { sleep, check } from 'k6';
 import { Rate } from 'k6/metrics';
 
+// Tell k6 that 429 is an *expected* status so it is NOT counted in
+// http_req_failed. That metric then only captures real errors (5xx,
+// timeouts, connection resets) — which is what we actually care about.
+http.setResponseCallback(http.expectedStatuses(200, 429));
+
 const BASE = __ENV.TARGET_URL || 'http://127.0.0.1:8080';
 
 // All 5 algorithm endpoints exposed by the gateway.
