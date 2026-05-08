@@ -1,0 +1,23 @@
+# Git
+.git/
+.gitignore
+
+# Compiled binaries
+bin/
+
+# Test artifacts
+*.test
+*.out
+*.prof
+
+# Claude Code metadata (not needed in image)
+.claude/
+
+# Local docs
+*.md
+EXPLAINED.md
+PRD.md
+
+# IDE
+.idea/
+.vscode/

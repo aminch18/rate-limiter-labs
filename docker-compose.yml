@@ -1,0 +1,33 @@
+services:
+
+  gateway:
+    build:
+      context: .
+      args:
+        CMD: gateway
+    image: rate-limiter-gateway:local
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 2s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  # One-shot: runs the three traffic patterns and exits.
+  # docker compose up --abort-on-container-exit shows the comparison table.
+  loadgen:
+    build:
+      context: .
+      args:
+        CMD: loadgen
+    image: rate-limiter-loadgen:local
+    # Overrides ENTRYPOINT so we can pass the -addr flag pointing to the
+    # gateway service name (Docker Compose DNS resolves "gateway" → container IP).
+    command: ["-addr", "gateway:8080"]
+    depends_on:
+      gateway:
+        condition: service_healthy
+    restart: "no"

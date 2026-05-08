@@ -1,6 +1,7 @@
 # Requiere GNU Make. En Windows: winget install GnuWin32.Make
 # o usar los comandos go directamente (ver README.md → "Referencia de comandos")
-.PHONY: help test bench lint fmt build gateway loadgen demo clean
+.PHONY: help test bench lint fmt build gateway loadgen demo clean \
+        docker-build docker-up docker-down docker-logs k8s-apply k8s-delete
 
 # Default target
 help:
@@ -16,6 +17,17 @@ help:
 	@echo "  make loadgen     Lanza el generador de carga contra localhost:8080"
 	@echo "  make demo        Arranca gateway + loadgen juntos (necesita dos terminales)"
 	@echo "  make clean       Elimina binarios compilados"
+	@echo ""
+	@echo "Docker"
+	@echo "  make docker-build  Construye las imágenes gateway y loadgen"
+	@echo "  make docker-up     Levanta gateway + loadgen con docker compose"
+	@echo "  make docker-down   Para y elimina los contenedores"
+	@echo "  make docker-logs   Tail de logs del gateway"
+	@echo ""
+	@echo "Kubernetes"
+	@echo "  make k8s-apply   Aplica los manifiestos en k8s/"
+	@echo "  make k8s-logs    Logs del job loadgen en tiempo real"
+	@echo "  make k8s-delete  Elimina todos los recursos de k8s/"
 	@echo ""
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
@@ -81,3 +93,42 @@ demo:
 
 clean:
 	rm -rf bin/
+
+# ── Docker ────────────────────────────────────────────────────────────────────
+
+# Build both images locally (no registry push).
+docker-build:
+	docker build --build-arg CMD=gateway -t rate-limiter-gateway:local .
+	docker build --build-arg CMD=loadgen -t rate-limiter-loadgen:local .
+
+# Start gateway + run loadgen via docker compose.
+# Loadgen exits after printing the table; gateway keeps running.
+# Use --abort-on-container-exit to stop everything when loadgen finishes.
+docker-up:
+	docker compose up --build --abort-on-container-exit
+
+# Stop and remove containers (keeps images).
+docker-down:
+	docker compose down
+
+# Tail gateway logs.
+docker-logs:
+	docker compose logs -f gateway
+
+# ── Kubernetes ────────────────────────────────────────────────────────────────
+
+# Apply all manifests. Set IMAGE_TAG before calling if pushing to a registry:
+#   make k8s-apply IMAGE_TAG=ghcr.io/tu-usuario/rate-limiter-gateway:v1.0
+IMAGE_TAG ?= rate-limiter-gateway:latest
+
+k8s-apply:
+	kubectl apply -f k8s/gateway.yaml
+	kubectl apply -f k8s/loadgen-job.yaml
+
+# Watch the loadgen job output live.
+k8s-logs:
+	kubectl wait --for=condition=ready pod -l job-name=loadgen --timeout=30s
+	kubectl logs -f job/loadgen
+
+k8s-delete:
+	kubectl delete -f k8s/ --ignore-not-found

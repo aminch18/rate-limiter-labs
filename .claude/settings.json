@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "gofmt -w $(echo $CLAUDE_FILE_PATHS) && go vet ./..."
+            "command": "for f in $CLAUDE_FILE_PATHS; do case \"$f\" in *.go) gofmt -w \"$f\";; esac; done && go vet ./..."
           }
         ]
       }
